@@ -334,5 +334,217 @@ async def ban_all_bots(ctx):
     banned = sum(1 for r in results if not isinstance(r, Exception))
     await ctx.send(f'✅ Banned {banned} bots!')
 
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def backup(ctx):
+    guild = ctx.guild
+    await ctx.send("📦 Starting server backup...")
+
+    # Collect data
+    backup_data = {
+        "name": guild.name,
+        "roles": [],
+        "channels": [],
+        "categories": [],
+        "emojis": []
+    }
+
+    # Roles (name, color, permissions, hoist, mentionable)
+    for role in guild.roles:
+        if role.managed or role.is_default():  # Skip @everyone and managed
+            continue
+        backup_data["roles"].append({
+            "name": role.name,
+            "color": role.color.value,
+            "permissions": role.permissions.value,
+            "hoist": role.hoist,
+            "mentionable": role.mentionable
+        })
+
+    # Channels (text/voice, permissions, position)
+    for channel in guild.channels:
+        perms = []
+        for overwrite in channel.overwrites:
+            perms.append({
+                "id": overwrite.id,
+                "type": "role" if isinstance(overwrite, discord.Role) else "member",
+                "allow": overwrite.allow.value,
+                "deny": overwrite.deny.value
+            })
+        backup_data["channels"].append({
+            "name": channel.name,
+            "type": str(channel.type),
+            "position": channel.position,
+            "permissions": perms,
+            "category_id": channel.category_id if channel.category else None
+        })
+
+    # Emojis
+    for emoji in guild.emojis:
+        backup_data["emojis"].append({
+            "name": emoji.name,
+            "url": str(emoji.url)
+        })
+
+    # Save to JSON file
+    import json
+    import os
+    backup_folder = "backups"
+    if not os.path.exists(backup_folder):
+        os.makedirs(backup_folder)
+    filename = f"{backup_folder}/backup_{guild.id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(filename, 'w') as f:
+        json.dump(backup_data, f, indent=4)
+
+    await ctx.send(f"✅ Backup complete! Saved to `{filename}` on the server.")
+    print(f"Backup saved: {filename}")
+
+@bot.command()
+@commands.has_permissions(administrator=True)
+async def restore(ctx):
+    guild = ctx.guild
+    await ctx.send("⚠️ **WARNING**: This will OVERWRITE your server! Type 'confirm' in 30 seconds to proceed.")
+
+    def check(m):
+        return m.author == ctx.author and m.content.lower() == 'confirm'
+
+    try:
+        msg = await bot.wait_for('message', check=check, timeout=30.0)
+    except asyncio.TimeoutError:
+        await ctx.send("Restore cancelled.")
+        return
+
+    await ctx.send("🔄 Restoring server...")
+
+    # Find latest backup
+    import glob
+    backups = glob.glob("backups/backup_*.json")
+    if not backups:
+        await ctx.send("No backups found!")
+        return
+    latest = max(backups, key=os.path.getctime)
+    with open(latest, 'r') as f:
+        data = json.load(f)
+
+    # Restore roles
+    for role_data in data["roles"]:
+        try:
+            await guild.create_role(
+                name=role_data["name"],
+                color=discord.Color(role_data["color"]),
+                permissions=discord.Permissions(role_data["permissions"]),
+                hoist=role_data["hoist"],
+                mentionable=role_data["mentionable"]
+            )
+            print(f"Restored role: {role_data['name']}")
+        except:
+            pass
+
+    # Restore channels (simplified - creates text/voice)
+    for ch_data in data["channels"]:
+        try:
+            if ch_data["type"] == "text":
+                await guild.create_text_channel(ch_data["name"], position=ch_data["position"])
+            elif ch_data["type"] == "voice":
+                await guild.create_voice_channel(ch_data["name"], position=ch_data["position"])
+            print(f"Restored channel: {ch_data['name']}")
+        except:
+            pass
+
+    # Emojis
+    for emoji_data in data["emojis"]:
+        try:
+            response = requests.get(emoji_data["url"])
+            await guild.create_custom_emoji(name=emoji_data["name"], image=response.content)
+        except:
+            pass
+
+    await ctx.send("✅ Server restore complete! Check everything.")
+
+import json
+import os
+import asyncio
+import datetime
+
+# Auto-backup every 3 weeks (21 days = 1,814,400 seconds)
+AUTO_BACKUP_INTERVAL = 21 * 24 * 60 * 60  # 3 weeks in seconds
+
+async def create_backup(guild):
+    print("📦 Starting automatic server backup...")
+
+    backup_data = {
+        "name": guild.name,
+        "timestamp": datetime.datetime.utcnow().isoformat(),
+        "roles": [],
+        "channels": [],
+        "emojis": []
+    }
+
+    # Roles
+    for role in guild.roles:
+        if role.managed or role.is_default():
+            continue
+        backup_data["roles"].append({
+            "name": role.name,
+            "color": role.color.value,
+            "permissions": role.permissions.value,
+            "hoist": role.hoist,
+            "mentionable": role.mentionable
+        })
+
+    # Channels
+    for channel in guild.channels:
+        perms = []
+        for overwrite in channel.overwrites:
+            perms.append({
+                "id": overwrite.id,
+                "type": "role" if isinstance(overwrite, discord.Role) else "member",
+                "allow": overwrite.allow.value,
+                "deny": overwrite.deny.value
+            })
+        backup_data["channels"].append({
+            "name": channel.name,
+            "type": str(channel.type),
+            "position": channel.position,
+            "permissions": perms,
+            "category_id": channel.category_id if channel.category else None
+        })
+
+    # Emojis
+    for emoji in guild.emojis:
+        backup_data["emojis"].append({
+            "name": emoji.name,
+            "url": str(emoji.url)
+        })
+
+    # Save to file
+    backup_folder = "backups"
+    if not os.path.exists(backup_folder):
+        os.makedirs(backup_folder)
+    filename = f"{backup_folder}/auto_backup_{guild.id}_{datetime.datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    with open(filename, 'w') as f:
+        json.dump(backup_data, f, indent=4)
+
+    print(f"✅ Automatic backup saved: {filename}")
+
+@bot.event
+async def on_ready():
+    print(f'🛡️ ANTI-RAID BOT ONLINE: {bot.user}')
+    Thread(target=run_flask).start()  # Your existing Flask keep-alive
+
+    # Start auto-backup loop
+    async def auto_backup_loop():
+        while True:
+            try:
+                # Backup all guilds the bot is in (in case it's in multiple servers)
+                for guild in bot.guilds:
+                    await create_backup(guild)
+            except Exception as e:
+                print(f"Auto-backup error: {e}")
+            await asyncio.sleep(AUTO_BACKUP_INTERVAL)  # Wait 3 weeks
+
+    bot.loop.create_task(auto_backup_loop())
+
 # Start the bot using environment variable
 bot.run(os.getenv("DISCORD_TOKEN"))
+
