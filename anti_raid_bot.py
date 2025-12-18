@@ -3,6 +3,9 @@ from discord.ext import commands
 import asyncio
 from datetime import datetime, timedelta
 from collections import defaultdict
+from flask import Flask
+from threading import Thread
+import os
 
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix='!', intents=intents)
@@ -13,9 +16,24 @@ join_tracker = defaultdict(list)
 raid_mode = False
 emergency_channel_ids = set()
 
+# Flask for health check (prevents Render spin-down)
+app = Flask(__name__)
+
+@app.route('/ping')
+def ping():
+    return "PONG! Anti-Raid Bot is alive."
+
+@app.route('/health')
+def health():
+    return "OK"
+
+def run_flask():
+    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 8080)))
+
 @bot.event
 async def on_ready():
     print(f'🛡️ ANTI-RAID BOT ONLINE: {bot.user}')
+    Thread(target=run_flask).start()  # Start Flask to keep Render awake
 
 @bot.event
 async def on_guild_channel_create(channel):
@@ -131,16 +149,13 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# ───────────────────────────────────────────────────────────────
-# FIXED EMERGENCY CHANNEL CREATION (FULLY WORKING NOW)
-# ───────────────────────────────────────────────────────────────
+# FIXED EMERGENCY CHANNEL CREATION
 async def create_emergency_channels(guild):
     global emergency_channel_ids
     emergency_channel_ids.clear()
 
     print("🛡️ Starting emergency lockdown...")
 
-    # Step 1: Safe one-by-one channel deletion
     channels = list(guild.channels)
     print(f"Deleting {len(channels)} channels...")
 
@@ -156,17 +171,10 @@ async def create_emergency_channels(guild):
             print(f"Failed to delete {channel.name}: {e}")
 
     print("✅ All channels deleted successfully")
-
-    # CRITICAL: LONG WAIT - Discord needs time to unlock guild after mass deletion
-    print("Waiting 10 seconds for Discord to finish processing deletions...")
+    print("Waiting 10 seconds for Discord to finish processing...")
     await asyncio.sleep(10)
 
-    # Step 2: Create emergency channels with safety checks
-    being_fixed = None
-    temp = None
-
     try:
-        # Create being-fixed (read-only)
         being_fixed = await guild.create_text_channel("being-fixed")
         await being_fixed.set_permissions(
             guild.default_role,
@@ -177,10 +185,8 @@ async def create_emergency_channels(guild):
         emergency_channel_ids.add(being_fixed.id)
         print(f"✅ Created #being-fixed: {being_fixed.id}")
 
-        # Wait before second channel
         await asyncio.sleep(3)
 
-        # Create only-temporary (chat allowed)
         temp = await guild.create_text_channel("only-temporary")
         await temp.set_permissions(
             guild.default_role,
@@ -191,67 +197,58 @@ async def create_emergency_channels(guild):
         emergency_channel_ids.add(temp.id)
         print(f"✅ Created #only-temporary: {temp.id}")
 
-        # Wait a bit more before sending messages
         await asyncio.sleep(2)
 
-        # Send messages only if channels still exist
-        if being_fixed:
-            try:
-                explanation_embed = discord.Embed(
-                    title="🛡️ RAID ATTACK STOPPED",
-                    description="Our security system detected and stopped a raid attack on this server.",
-                    color=discord.Color.red()
-                )
-                explanation_embed.add_field(
-                    name="⚠️ What Happened:",
-                    value="• Malicious bots joined the server\n• They attempted to spam channels\n• They tried to create hundreds of fake channels\n• Our anti-raid system detected this instantly",
-                    inline=False
-                )
-                explanation_embed.add_field(
-                    name="✅ How We Fixed It:",
-                    value="• **Banned all raid bots** within seconds\n• **Deleted all compromised channels**\n• **Removed all malicious webhooks**\n• **Created these temporary channels** for communication\n• **Protected your data** - nothing was lost",
-                    inline=False
-                )
-                explanation_embed.add_field(
-                    name="📢 What's Next:",
-                    value="• Admins will restore the server shortly\n• Use #only-temporary to chat in the meantime\n• **Please don't leave!** Everything is under control\n• Your roles and permissions are safe",
-                    inline=False
-                )
-                explanation_embed.add_field(
-                    name="💙 Thank You!",
-                    value="Thank you for your patience and for staying with us. We take server security seriously and will have everything back to normal very soon!",
-                    inline=False
-                )
-                explanation_embed.set_footer(text=f"Security Team • {guild.name}")
-                explanation_embed.timestamp = datetime.utcnow()
+        # Comforting message in being-fixed
+        explanation_embed = discord.Embed(
+            title="🛡️ RAID ATTACK STOPPED",
+            description="Our security system detected and stopped a raid attack on this server.",
+            color=discord.Color.red()
+        )
+        explanation_embed.add_field(
+            name="⚠️ What Happened:",
+            value="• Malicious bots joined the server\n• They attempted to spam channels\n• They tried to create hundreds of fake channels\n• Our anti-raid system detected this instantly",
+            inline=False
+        )
+        explanation_embed.add_field(
+            name="✅ How We Fixed It:",
+            value="• **Banned all raid bots** within seconds\n• **Deleted all compromised channels**\n• **Removed all malicious webhooks**\n• **Created these temporary channels** for communication\n• **Protected your data** - nothing was lost",
+            inline=False
+        )
+        explanation_embed.add_field(
+            name="📢 What's Next:",
+            value="• Admins will restore the server shortly\n• Use #only-temporary to chat in the meantime\n• **Please don't leave!** Everything is under control\n• Your roles and permissions are safe",
+            inline=False
+        )
+        explanation_embed.add_field(
+            name="💙 Thank You!",
+            value="Thank you for your patience and for staying with us. We take server security seriously and will have everything back to normal very soon!",
+            inline=False
+        )
+        explanation_embed.set_footer(text=f"Security Team • {guild.name}")
+        explanation_embed.timestamp = datetime.utcnow()
 
-                await being_fixed.send(content="@everyone **PLEASE READ**", embed=explanation_embed)
-                print("✅ Sent raid explanation message to #being-fixed")
-            except discord.NotFound:
-                print("⚠️ #being-fixed was deleted by Discord - re-creating...")
-                # Optional: re-create if needed
+        await being_fixed.send(content="@everyone **PLEASE READ**", embed=explanation_embed)
+        print("✅ Sent raid explanation message to #being-fixed")
 
-        if temp:
-            try:
-                temp_embed = discord.Embed(
-                    title="💬 Temporary Chat Room",
-                    description="Welcome! You can chat here while we restore the server.",
-                    color=discord.Color.green()
-                )
-                temp_embed.add_field(
-                    name="ℹ️ About This Channel:",
-                    value="This is a temporary channel for everyone to communicate while admins restore the server. Check #being-fixed for updates on what happened and the fix progress!",
-                    inline=False
-                )
-                temp_embed.add_field(
-                    name="📋 Rules:",
-                    value="• Be respectful\n• No spam\n• Stay calm - everything is under control\n• Ask questions if you need clarification",
-                    inline=False
-                )
-                await temp.send(content="@everyone", embed=temp_embed)
-                print("✅ Sent welcome message to #only-temporary")
-            except discord.NotFound:
-                print("⚠️ #only-temporary was deleted by Discord - re-creating...")
+        # Welcome in only-temporary
+        temp_embed = discord.Embed(
+            title="💬 Temporary Chat Room",
+            description="Welcome! You can chat here while we restore the server.",
+            color=discord.Color.green()
+        )
+        temp_embed.add_field(
+            name="ℹ️ About This Channel:",
+            value="This is a temporary channel for everyone to communicate while admins restore the server. Check #being-fixed for updates on what happened and the fix progress!",
+            inline=False
+        )
+        temp_embed.add_field(
+            name="📋 Rules:",
+            value="• Be respectful\n• No spam\n• Stay calm - everything is under control\n• Ask questions if you need clarification",
+            inline=False
+        )
+        await temp.send(content="@everyone", embed=temp_embed)
+        print("✅ Sent welcome message to #only-temporary")
 
         print("✅ Emergency channels fully created and messages sent successfully!")
         return being_fixed, temp
@@ -265,9 +262,7 @@ async def create_emergency_channels(guild):
     except Exception as e:
         print(f"Unexpected error: {e}")
         return None, None
-# ───────────────────────────────────────────────────────────────
-# LOCKDOWN FUNCTION
-# ───────────────────────────────────────────────────────────────
+
 async def instant_lockdown(guild, reason):
     global raid_mode
 
@@ -277,7 +272,6 @@ async def instant_lockdown(guild, reason):
     raid_mode = True
     print(f"🚨 RAID MODE ACTIVATED: {reason}")
 
-    # Ban recent suspicious bots
     ban_tasks = []
     now = datetime.now()
     for member in guild.members:
@@ -291,7 +285,6 @@ async def instant_lockdown(guild, reason):
     await asyncio.gather(*ban_tasks, return_exceptions=True)
     print("✅ Raid bots banned")
 
-    # Delete webhooks
     webhook_tasks = []
     for channel in guild.text_channels:
         try:
@@ -304,7 +297,6 @@ async def instant_lockdown(guild, reason):
     await asyncio.gather(*webhook_tasks, return_exceptions=True)
     print("✅ Webhooks deleted")
 
-    # Create emergency channels
     being_fixed, temp = await create_emergency_channels(guild)
     if not being_fixed or not temp:
         print("❌ Failed to create emergency channels!")
@@ -312,9 +304,7 @@ async def instant_lockdown(guild, reason):
 
     print(f"✅ Lockdown complete. Emergency channels: {being_fixed.name} & {temp.name}")
 
-# ───────────────────────────────────────────────────────────────
-# ADMIN COMMANDS (only the safe ones kept)
-# ───────────────────────────────────────────────────────────────
+# Admin commands
 @bot.command()
 @commands.has_permissions(administrator=True)
 async def lockdown(ctx):
@@ -344,7 +334,5 @@ async def ban_all_bots(ctx):
     banned = sum(1 for r in results if not isinstance(r, Exception))
     await ctx.send(f'✅ Banned {banned} bots!')
 
-# ───────────────────────────────────────────────────────────────
-# START THE BOT
-# ───────────────────────────────────────────────────────────────
-bot.run('DISCORD_TOKEN')  # Replace with your NEW token!
+# Start the bot using environment variable
+bot.run(os.getenv("DISCORD_TOKEN"))
